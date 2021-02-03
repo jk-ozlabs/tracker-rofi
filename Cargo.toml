@@ -1,0 +1,13 @@
+[package]
+name = "tracker-rofi"
+version = "0.1.0"
+authors = ["Jeremy Kerr <jk@ozlabs.org>"]
+edition = "2018"
+
+[dependencies]
+anyhow = "^1.0"
+percent-encoding = "^2.1"
+dbus = "^0.9"
+url = "^2.2"
+opener = "^0.4"
+fork = "^0.1"
