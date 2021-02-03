@@ -161,7 +161,7 @@ fn escape_result(r: &str) -> String
 
 fn format_result(r: &QueryResult) -> Vec<u8> {
     let opts: Vec<(&str,&str)> = vec![("info", &r.uuid)];
-    format_rofi_option(Some(&escape_result(&r.description())), opts.into_iter())
+    format_rofi_option(Some(&escape_result(&r.description())), opts)
 }
 
 fn main() -> anyhow::Result<()> {
