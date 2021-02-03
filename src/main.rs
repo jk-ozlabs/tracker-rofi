@@ -133,18 +133,35 @@ fn tracker_query_uuid(uuid: &str) -> anyhow::Result<String> {
     Ok(uri.to_string())
 }
 
+fn format_rofi_option<'a, I>(val: Option<&'a str>, meta: I) -> Vec<u8>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>
+{
+    let mut v = Vec::new();
+    if let Some(valstr) = val {
+        v.extend(valstr.as_bytes())
+    }
+    v.push(0);
+    v.extend(meta.into_iter().map(|(name,val)| {
+                let mut optdata = Vec::new();
+                optdata.extend(name.as_bytes());
+                optdata.push(0x1f);
+                optdata.extend(val.as_bytes());
+                optdata })
+            .collect::<Vec<_>>()
+            .join(&0x1fu8));
+    v.push(0x0a);
+    v
+}
+
 fn escape_result(r: &str) -> String
 {
     r.replace('\n', " ").replace('\0', "")
 }
 
 fn format_result(r: &QueryResult) -> Vec<u8> {
-    let mut v = Vec::new();
-    v.extend(escape_result(&r.description()).as_bytes());
-    v.extend(b"\0info\x1f");
-    v.extend(r.uuid.as_bytes());
-    v.push(b'\n');
-    v
+    let opts: Vec<(&str,&str)> = vec![("info", &r.uuid)];
+    format_rofi_option(Some(&escape_result(&r.description())), opts.into_iter())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -172,11 +189,19 @@ fn main() -> anyhow::Result<()> {
     let stdout = io::stdout();
     let mut fd = stdout.lock();
 
-    tracker_search(&query)
-        .with_context(|| format!("failed search for \"{}\"", query))?
-        .into_iter()
-        .map(|r| format_result(&r))
-        .map(|s| fd.write_all(&s))
-        .fold(anyhow::Result::Ok(()),
-            |s,r| { s.and(r.context("write")) })
+    let results = tracker_search(&query)
+        .with_context(|| format!("failed search for \"{}\"", query))?;
+
+    if results.len() == 0 {
+        let opt = format_rofi_option(Some("no results"),
+                    vec![("nonselectable", "true")]);
+        fd.write_all(&opt).context("write")
+    } else {
+        results
+            .into_iter()
+            .map(|r| format_result(&r))
+            .map(|s| fd.write_all(&s))
+            .fold(anyhow::Result::Ok(()),
+                |s,r| { s.and(r.context("write")) })
+    }
 }
