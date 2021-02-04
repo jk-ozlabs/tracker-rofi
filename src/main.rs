@@ -84,7 +84,7 @@ fn tracker_search(q: &str) -> anyhow::Result<Vec<QueryResult>> {
                     ?s nie:url ?uri .
                     OPTIONAL {{ ?s nie:title ?title . }}
                 }}
-                ORDER BY ?uri OFFSET 0 LIMIT 15"#, sparql_escape(q));
+                OFFSET 0 LIMIT 15"#, sparql_escape(q));
 
     let msg = Message::new_method_call("org.freedesktop.Tracker1",
             "/org/freedesktop/Tracker1/Resources",
