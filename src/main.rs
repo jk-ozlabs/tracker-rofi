@@ -73,7 +73,7 @@ fn sparql_escape(s: &str) -> String {
         .replace('\'', r#"\'"#)
 }
 
-fn tracker_search(q: &str) -> anyhow::Result<Vec<QueryResult>> {
+fn tracker_search_v1(q: &str) -> anyhow::Result<Vec<QueryResult>> {
     let conn = Connection::new_session()?;
 
     let query =
@@ -105,7 +105,7 @@ fn tracker_search(q: &str) -> anyhow::Result<Vec<QueryResult>> {
     Ok(res)
 }
 
-fn tracker_query_uuid(uuid: &str) -> anyhow::Result<String> {
+fn tracker_query_uuid_v1(uuid: &str) -> anyhow::Result<String> {
     let conn = Connection::new_session()?;
 
     let msg = Message::new_method_call("org.freedesktop.Tracker1",
@@ -174,7 +174,7 @@ fn main() -> anyhow::Result<()> {
 
     /* if we have an info string, lookup a uuid and open */
     if let Ok(uuid) = env::var("ROFI_INFO") {
-        let uri = tracker_query_uuid(&uuid)
+        let uri = tracker_query_uuid_v1(&uuid)
             .with_context(|| format!("can't lookup UUID '{}'", uuid))?;
         return match daemon(false, false) {
             Err(_) => Err(anyhow!("can't fork")),
@@ -189,7 +189,7 @@ fn main() -> anyhow::Result<()> {
     let stdout = io::stdout();
     let mut fd = stdout.lock();
 
-    let results = tracker_search(&query)
+    let results = tracker_search_v1(&query)
         .with_context(|| format!("failed search for \"{}\"", query))?;
 
     if results.len() == 0 {
