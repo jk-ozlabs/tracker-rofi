@@ -6,14 +6,22 @@
 
 use std::env;
 use std::time::Duration;
-use std::io::{self, Write};
+use std::collections::HashMap;
+use std::io::{self, Read, Write};
 use anyhow::{anyhow, Context};
 use dbus::blocking::Connection;
 use dbus::Message;
+use dbus::arg::Variant;
 use fork::{daemon, Fork};
 use opener;
 use percent_encoding::percent_decode_str;
 use url::Url;
+use fd::Pipe;
+
+use nom::number::complete::u32;
+use nom::bytes::complete::tag;
+use nom::multi::{count};
+use nom::sequence::tuple;
 
 const DBUS_TIMEOUT: Duration = Duration::from_millis(2000);
 
@@ -22,7 +30,7 @@ struct QueryResult {
     uuid: String,
     uri: Url,
     title: String,
-    snippet: String,
+    _snippet: String,
 }
 
 impl QueryResult {
@@ -31,7 +39,7 @@ impl QueryResult {
             uuid: uuid.to_string(),
             uri: Url::parse(uristr).ok()?,
             title: title.to_string(),
-            snippet: snippet.to_string(),
+            _snippet: snippet.to_string(),
         })
     }
 
@@ -73,63 +81,111 @@ fn sparql_escape(s: &str) -> String {
         .replace('\'', r#"\'"#)
 }
 
-fn tracker_search_v1(q: &str) -> anyhow::Result<Vec<QueryResult>> {
+//fn parse_one(buf: &[u8]) -> IResult<&[u8], (String, String, String, String)> {
+fn parse_one(buf: &[u8]) -> nom::IResult<&[u8], QueryResult> {
+    let p = u32(nom::number::Endianness::Native);
+
+    let (b, _) = tag([4u8, 0, 0, 0])(buf)?;
+    let (b, _types) = count(p, 4)(b)?;
+    let (mut b, lengths) = count(p, 4)(b)?;
+
+    let mut offset = 0;
+    let mut res = Vec::new();
+
+    for l in lengths {
+        let len = l - offset;
+        let (bp, x) = nom::bytes::complete::take(len)(b)?;
+        let (bp, _) = nom::bytes::complete::tag(&[0u8])(bp)?;
+        b = bp;
+        res.push(std::str::from_utf8(x).unwrap());
+        offset += len + 1;
+    }
+
+    let qr = QueryResult::new(res[0], res[1], res[2], res[3]).unwrap();
+
+    Ok((b, qr))
+}
+
+fn tracker_search_v3(q: &str) -> anyhow::Result<Vec<QueryResult>> {
     let conn = Connection::new_session()?;
+    let mut pipe = Pipe::new()?;
+    let args : HashMap<&str,Variant<u32>> = HashMap::new();
 
     let query =
             format!(r#"SELECT ?s ?uri ?title fts:snippet(?s, "", "")
                 WHERE {{
                     ?s fts:match "{}" .
-                    ?s tracker:available true .
+                    ?s nie:isStoredAs/nie:dataSource/tracker:available
+                        | nie:dataSource/tracker:available true
+                    .
                     ?s nie:url ?uri .
                     OPTIONAL {{ ?s nie:title ?title . }}
                 }}
                 OFFSET 0 LIMIT 15"#, sparql_escape(q));
 
-    let msg = Message::new_method_call("org.freedesktop.Tracker1",
-            "/org/freedesktop/Tracker1/Resources",
-            "org.freedesktop.Tracker1.Resources",
-            "SparqlQuery")
+    let msg = Message::new_method_call("org.freedesktop.Tracker3.Miner.Files",
+            "/org/freedesktop/Tracker3/Endpoint",
+            "org.freedesktop.Tracker3.Endpoint",
+            "Query")
         .unwrap()
-        .append1(query);
+        .append1(query)
+        .append1(pipe.writer)
+        .append1(args);
 
     let reply = conn.channel().send_with_reply_and_block(msg, DBUS_TIMEOUT)?;
 
-    let res = reply.read1::<Vec<Vec<&str>>>()?
-        .iter()
-        .filter_map(|v| {
-            QueryResult::new(v[0], v[1], v[2], v[3])
-        })
-        .collect();
+    /* ensure we have four columns */
+    let res = reply.read1::<Vec<&str>>()?;
+
+    if res.len() != 4 {
+        return Err(anyhow!("Invalid search results"));
+    }
+
+    let mut buf = Vec::new();
+    pipe.reader.read_to_end(&mut buf)?;
+
+    let (_, res) = nom::multi::many0(parse_one)(buf.as_slice()).unwrap();
 
     Ok(res)
 }
 
-fn tracker_query_uuid_v1(uuid: &str) -> anyhow::Result<String> {
+fn tracker_query_uuid_v3(uuid: &str) -> anyhow::Result<String> {
     let conn = Connection::new_session()?;
+    let mut pipe = Pipe::new()?;
+    let args : HashMap<&str,Variant<u32>> = HashMap::new();
 
-    let msg = Message::new_method_call("org.freedesktop.Tracker1",
-                                       "/org/freedesktop/Tracker1/Resources",
-                                       "org.freedesktop.Tracker1.Resources",
-                                       "SparqlQuery")
+    let msg = Message::new_method_call("org.freedesktop.Tracker3.Miner.Files",
+                                       "/org/freedesktop/Tracker3/Endpoint",
+                                       "org.freedesktop.Tracker3.Endpoint",
+                                       "Query")
         .unwrap()
         .append1(format!(r#"SELECT ?url
                  WHERE {{
                     "{}" nie:url ?url
                  }}
-                 LIMIT 1"#, sparql_escape(uuid)));
+                 LIMIT 1"#, sparql_escape(uuid)))
+        .append1(pipe.writer)
+        .append1(args);
 
     let reply = conn.channel().send_with_reply_and_block(msg, DBUS_TIMEOUT)?;
 
-    let res = reply.read1::<Vec<Vec<&str>>>()
-        .context("Can't parse query results")?;
+    let res = reply.read1::<Vec<&str>>()?;
+    if res.len() != 1 {
+        return Err(anyhow!("Invalid UUID search result"));
+    }
 
-    let uri = res
-        .get(0)
-        .ok_or(anyhow!("No results"))?
-        .get(0)
-        .ok_or(anyhow!("Invalid results"))?;
+    let mut buf = Vec::new();
+    pipe.reader.read_to_end(&mut buf)?;
+    let b = buf.as_slice();
 
+    let p = u32(nom::number::Endianness::Native);
+
+    let res : nom::IResult<&[u8],(_, u32,u32)> = tuple((tag([1u8, 0, 0, 0]), p, p))(b);
+    let (b, (_, _type, len)) = res.unwrap();
+    let res : nom::IResult<&[u8],&[u8]> = nom::bytes::complete::take(len)(b);
+    let (_, x) = res.unwrap();
+
+    let uri = std::str::from_utf8(x).unwrap();
     Ok(uri.to_string())
 }
 
@@ -174,7 +230,7 @@ fn main() -> anyhow::Result<()> {
 
     /* if we have an info string, lookup a uuid and open */
     if let Ok(uuid) = env::var("ROFI_INFO") {
-        let uri = tracker_query_uuid_v1(&uuid)
+        let uri = tracker_query_uuid_v3(&uuid)
             .with_context(|| format!("can't lookup UUID '{}'", uuid))?;
         return match daemon(false, false) {
             Err(_) => Err(anyhow!("can't fork")),
@@ -189,7 +245,7 @@ fn main() -> anyhow::Result<()> {
     let stdout = io::stdout();
     let mut fd = stdout.lock();
 
-    let results = tracker_search_v1(&query)
+    let results = tracker_search_v3(&query)
         .with_context(|| format!("failed search for \"{}\"", query))?;
 
     if results.len() == 0 {
