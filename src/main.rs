@@ -112,7 +112,7 @@ fn tracker_search_v3(q: &str) -> anyhow::Result<Vec<QueryResult>> {
     let args : HashMap<&str,Variant<u32>> = HashMap::new();
 
     let query =
-            format!(r#"SELECT ?s ?uri ?title fts:snippet(?s, "", "")
+            format!(r#"SELECT DISTINCT ?s ?uri ?title fts:snippet(?s, "", "")
                 WHERE {{
                     ?s fts:match "{}" .
                     ?s nie:isStoredAs/nie:dataSource/tracker:available
